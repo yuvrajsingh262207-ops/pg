@@ -1,0 +1,31 @@
+const assert=require("node:assert/strict");
+const fs=require("node:fs");
+const path=require("node:path");
+const {execFileSync}=require("node:child_process");
+const list=fs.readFileSync(path.join(__dirname,"../extension/public_suffix_list.dat"),"utf8");
+global.chrome={runtime:{getURL:()=>"chrome-extension://test/public_suffix_list.dat"}};
+global.fetch=async()=>({ok:true,text:async()=>list});
+const local=require("../extension/local-detector.js");
+(async()=>{
+  const safe=await local.analyze("https://example.org/");
+  assert.equal(safe.registered_domain,"example.org");assert.equal(safe.risk_score,0);
+  const coUk=await local.analyze("https://login.example.co.uk/path");
+  assert.equal(coUk.registered_domain,"example.co.uk");assert.equal(coUk.url_features.subdomain_count,1);
+  const brand=await local.analyze("https://google.com.account-verification.example.org/login");
+  assert.equal(brand.registered_domain,"example.org");assert.equal(brand.risk_score,55);assert.equal(brand.risk_category,"High Risk");
+  const pathOnly=await local.analyze("https://example.org/google/login");
+  assert.equal(pathOnly.risk_score,0);assert.equal(pathOnly.trust_gap.mismatch,false);
+  const privateShape=await local.analyze("https://example.org/login",{userinfo_present:true,query_present:true,query_length:64,fragment_present:true});
+  assert.equal(privateShape.url_features.userinfo_present,true);assert.equal(privateShape.url_features.query_length,64);
+  assert(!privateShape.submitted_url.includes("?"));assert(!privateShape.submitted_url.includes("#"));
+  const sensitive=await local.analyze("https://user:pass@example.org/login?token=secret#private");
+  assert(!/user|pass|token|secret|private/.test(sensitive.submitted_url));assert.equal(sensitive.url_features.userinfo_present,true);
+  const punycode=await local.analyze("https://xn--pple-43d.com/login");
+  assert.equal(punycode.risk_score,15);assert.equal(punycode.risk_category,"Lower Risk");
+  const ip=await local.analyze("http://192.168.1.10/login");
+  assert.equal(ip.risk_score,25);assert.equal(ip.risk_category,"Caution");
+  const urls=["https://example.org/","https://google.com.account-verification.example.org/login","http://192.168.1.10/login","https://xn--pple-43d.com/login","https://login.example.co.uk/path","https://google.com@evil.example.org/login","https://www.google.com/signin"];
+  const py=JSON.parse(execFileSync(path.join(__dirname,"../.venv/bin/python"),["-c",`import json,sys; from app.scanner import run_scan; print(json.dumps([run_scan(u) for u in json.loads(sys.argv[1])]))`,JSON.stringify(urls)],{cwd:path.join(__dirname,".."),encoding:"utf8"}));
+  for(let i=0;i<urls.length;i++){const js=await local.analyze(urls[i]);assert.equal(js.registered_domain,py[i].registered_domain,urls[i]);assert.equal(js.risk_score,py[i].risk_score,urls[i]);assert.equal(js.risk_category,py[i].risk_category,urls[i]);assert.deepEqual(js.findings.map(x=>x.name),py[i].findings.map(x=>x.name),urls[i])}
+  console.log("Sentinel local detector passed: 8 focused checks and Python scanner parity across 7 URLs");
+})().catch(e=>{console.error(e);process.exitCode=1});
